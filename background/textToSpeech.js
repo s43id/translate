@@ -518,7 +518,7 @@ const textToSpeech = function () {
     constructor() {
       /** @type {MediaElementAudioSourceNode[]} */
       this.sources = [];
-      if ("AudioContext" in window) {
+      if (typeof AudioContext !== "undefined") {
         this.audioCtx = new AudioContext();
         this.audioCtx.suspend();
         this.gainNode = this.audioCtx.createGain();
