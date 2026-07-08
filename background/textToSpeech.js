@@ -511,62 +511,6 @@ const textToSpeech = function () {
   var _promise = {
     _: null
   };
-  class AudioAmplifier {
-    /**
-     * Defines the Amplifier class for the text-to-speech service.
-     */
-    constructor() {
-      /** @type {MediaElementAudioSourceNode[]} */
-      this.sources = [];
-      if (typeof AudioContext !== "undefined") {
-        this.audioCtx = new AudioContext();
-        this.audioCtx.suspend();
-        this.gainNode = this.audioCtx.createGain();
-        this.gainNode.gain.value = 1;
-        this.gainNode.connect(this.audioCtx.destination);
-      }
-    }
-
-    /**
-     * Amplify the audio.
-     * @param {HTMLAudioElement} audio
-     */
-    async amplify(audio) {
-      if (!this.audioCtx) return;
-      if (this.sources.find(source => source.mediaElement === audio)) {
-        await this.audioCtx.resume();
-        return;
-      }
-      const source = this.audioCtx.createMediaElementSource(audio);
-      this.sources.push(source);
-      source.connect(this.gainNode);
-      await this.audioCtx.resume();
-    }
-
-    /**
-     * Set the volume of the amplifier.
-     * @param {number} volume
-     */
-    setVolume(volume) {
-      if (!this.gainNode) return;
-      if (volume > 1) {
-        this.gainNode.gain.value = volume;
-      } else {
-        this.gainNode.gain.value = 1;
-      }
-    }
-
-    /**
-     * Suspend the audio context.
-     * https://github.com/FilipePS/Traduzir-paginas-web/issues/802
-     * @returns {Promise<void>} Promise\<void\>
-     */
-    async suspend() {
-      if (this.audioCtx) {
-        await this.audioCtx.suspend();
-      }
-    }
-  }
   class Service {
     /**
      * Defines the Service class for the text-to-speech service.
@@ -583,10 +527,13 @@ const textToSpeech = function () {
       this.cbGetExtraParameters = cbGetExtraParameters;
       this.cbGetRequestBody = cbGetRequestBody;
 
-      /** @type {Map<string, HTMLAudioElement>} */
+      // Audio playback needs `Audio`/`AudioContext`, which don't exist in a
+      // service worker, so `this.audios` only caches the audio as a data URL
+      // string here; actual playback happens in the offscreen document.
+      /** @type {Map<string, string>} */
       this.audios = new Map();
       this.audioSpeed = 1.0;
-      this.audioAmplifier = new AudioAmplifier();
+      this.audioVolume = 1.0;
     }
 
     /**
@@ -633,28 +580,32 @@ const textToSpeech = function () {
     }
 
     /**
-     * Makes the request to the text-to-speech service and returns a promise that resolves with the result of the request.
+     * Makes the request to the text-to-speech service and returns a promise that resolves with a data URL of the result.
      *
      * The promise is rejected if there is an error.
      * @param {string} text
      * @param {string} targetLanguage
-     * @returns {Promise<any>} Promise\<blob\>
+     * @returns {Promise<string>} Promise\<dataURL\>
      */
     async makeRequest(text, targetLanguage) {
       return await new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.onload = e => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result);
-          reader.onerror = () => reject();
-          reader.readAsDataURL(xhr.response);
+          const contentType = xhr.getResponseHeader("Content-Type") || "audio/mpeg";
+          const bytes = new Uint8Array(xhr.response);
+          let binary = "";
+          const chunkSize = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunkSize) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+          }
+          resolve(`data:${contentType};base64,${btoa(binary)}`);
         };
         xhr.onerror = e => {
           console.error(e);
           reject();
         };
         xhr.open(this.xhrMethod, this.baseURL + this.cbGetExtraParameters(text, targetLanguage));
-        xhr.responseType = "blob";
+        xhr.responseType = "arraybuffer";
         if (this.cbGetRequestBody) {
           xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
           xhr.send(this.cbGetRequestBody(text, targetLanguage));
@@ -679,10 +630,9 @@ const textToSpeech = function () {
       for (const requestText of requests) {
         const audioKey = [targetLanguage, requestText].join(", ");
         if (!this.audios.get(audioKey)) {
-          promises.push(this.makeRequest(requestText, targetLanguage).then(/** @type {string} */response => {
-            const audio = new Audio(response);
-            this.audios.set(audioKey, audio);
-            return response;
+          promises.push(this.makeRequest(requestText, targetLanguage).then(/** @type {string} */dataUrl => {
+            this.audios.set(audioKey, dataUrl);
+            return dataUrl;
           }).catch(e => {
             console.error(e);
             return null;
@@ -694,48 +644,24 @@ const textToSpeech = function () {
     }
 
     /**
-     * Play the audio or all the audio in the array.
-     * @param {HTMLAudioElement | HTMLAudioElement[]} audios
+     * Play the audio(s), in order, through the offscreen document (service workers have no `Audio`).
+     * @param {string | string[]} audioUrls data URL(s) of the audio to play
      */
-    async play(audios) {
-      this.stopAll();
-      const result = await new Promise(async resolve => {
-        try {
-          if (audios instanceof Array) {
-            const playAll = async (/** @type {number} */currentIndex) => {
-              this.stopAll();
-              const audio = audios[currentIndex];
-              if (audio) {
-                audio.playbackRate = this.audioSpeed;
-                await this.audioAmplifier.amplify(audio);
-                audio.play();
-                audio.addEventListener("ended", () => {
-                  playAll(currentIndex + 1);
-                }, {
-                  once: true
-                });
-              } else {
-                resolve();
-              }
-            };
-            playAll(0);
-          } else if (audios instanceof HTMLAudioElement) {
-            audios.playbackRate = this.audioSpeed;
-            await this.audioAmplifier.amplify(audios);
-            audios.play();
-            audios.addEventListener("ended", () => {
-              resolve();
-            }, {
-              once: true
-            });
-          }
-        } catch (e) {
-          console.error(e);
-          resolve();
-        }
-      });
-      await this.audioAmplifier.suspend();
-      return result;
+    async play(audioUrls) {
+      const urls = (Array.isArray(audioUrls) ? audioUrls : [audioUrls]).filter(Boolean);
+      if (typeof ensureOffscreenDocumentForTextToSpeech === "function") {
+        await ensureOffscreenDocumentForTextToSpeech();
+      }
+      try {
+        await chrome.runtime.sendMessage({
+          action: "offscreenPlayAudio",
+          audioUrls: urls,
+          speed: this.audioSpeed,
+          volume: this.audioVolume
+        });
+      } catch (e) {
+        console.error(e);
+      }
     }
 
     /**
@@ -744,9 +670,10 @@ const textToSpeech = function () {
      */
     setAudioSpeed(speed) {
       this.audioSpeed = speed;
-      this.audios.forEach(audio => {
-        audio.playbackRate = this.audioSpeed;
-      });
+      chrome.runtime.sendMessage({
+        action: "offscreenSetAudioSpeed",
+        speed
+      }).catch(checkedLastError);
     }
 
     /**
@@ -754,25 +681,20 @@ const textToSpeech = function () {
      * @param {number} volume
      */
     setAudioVolume(volume) {
-      this.audios.forEach(audio => {
-        audio.volume = volume > 1 ? 1 : volume;
-      });
-      this.audioAmplifier.setVolume(volume < 1 ? 1 : volume);
+      this.audioVolume = volume;
+      chrome.runtime.sendMessage({
+        action: "offscreenSetAudioVolume",
+        volume
+      }).catch(checkedLastError);
     }
 
     /**
      * Pause all audio and reset audio time to start
      */
     stopAll() {
-      this.audios.forEach(audio => {
-        audio.pause();
-        // If `currentTime` is not `duration` an audio stream will remain active in Firefox
-        // https://github.com/FilipePS/Traduzir-paginas-web/issues/802
-        if (!isNaN(audio.duration) && isFinite(audio.duration)) {
-          audio.currentTime = audio.duration;
-        }
-      });
-      this.audioAmplifier.suspend();
+      chrome.runtime.sendMessage({
+        action: "offscreenStopAudio"
+      }).catch(checkedLastError);
     }
   }
 

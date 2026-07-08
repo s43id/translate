@@ -5,17 +5,10 @@
   </head>
   <body>
     <!--
-      Manifest V3 service workers have no DOM, so text-to-speech (which needs
-      `Audio`/`AudioContext` to play the synthesized speech) runs here instead,
-      in a hidden offscreen document created by background/serviceWorker.js.
+      Offscreen documents can only use chrome.runtime (no chrome.storage,
+      chrome.i18n, etc.), so this only plays audio that background/textToSpeech.js
+      (running in the service worker) already fetched and asks it to play.
     -->
-    <script src="/lib/polyfill.js"></script>
-    <script src="/lib/checkedLastError.js"></script>
-    <script src="/lib/stuff.js"></script>
-    <script src="/lib/languages.js"></script>
-    <script src="/lib/config.js"></script>
-    <script src="/lib/platformInfo.js"></script>
-    <script src="/lib/i18n.js"></script>
-    <script src="/background/textToSpeech.js"></script>
+    <script src="/offscreen/offscreen.js"></script>
   </body>
 </html>
